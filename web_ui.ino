@@ -3,16 +3,19 @@
 
 #include <WiFi.h>
 #include <WebServer.h>
+#include <Update.h>
 
 #define WIFI_STA_SSID   "AP"           // home WiFi SSID  (leave empty to skip STA)
-#define WIFI_STA_PASS   "Pass"         // home WiFi password
+#define WIFI_STA_PASS   "PASS1234"     // home WiFi password
 #define WIFI_AP_SSID    "Solo6C"
 #define WIFI_AP_PASS    "audio1234"
 #define WIFI_TIMEOUT_MS 10000          // ms to wait for STA before falling back
 #define LED_STATUS_PIN  15
 #define LED_BRIGHTNESS  10             // 15% of 255
 
-static WebServer _server(80);
+static WebServer  _server(80);
+static WiFiServer _sseServer(81);
+static WiFiClient _sseClient;
 
 // ── JSON state ────────────────────────────────────────────────────────────────
 static String stateJSON() {
@@ -48,31 +51,27 @@ static void handleSet() {
   if (_server.hasArg("treb")) { treb   = constrain(_server.arg("treb").toInt(), -7,  7); changed = true; setDisplay(PARAM_TREB); }
   if (_server.hasArg("ball")) { ball   = constrain(_server.arg("ball").toInt(), -6,  6); changed = true; setDisplay(PARAM_BALL); }
   if (_server.hasArg("stereo")) { stereo = constrain(_server.arg("stereo").toInt(), 0, 2); changed = true; setDisplay(PARAM_ST); }
-  if (_server.hasArg("mode"))   { mode   = constrain(_server.arg("mode").toInt(),   0, 3); changed = true; setDisplay(PARAM_MODE); }
+  if (_server.hasArg("mode"))   { mode   = constrain(_server.arg("mode").toInt(),   0, 1); changed = true; setDisplay(PARAM_MODE); }
 
   if (_server.hasArg("in")) {
-    byte newIn = constrain(_server.arg("in").toInt(), 0, 4);
+    byte newIn = constrain(_server.arg("in").toInt(), 2, 3);  // only inputs 2–3 wired
     if (power || mute) {
       // device is muted/standby — stage the input for when it comes back
       in_old = newIn;
     } else {
       in = newIn;
       switch (in) {
-        case 0: gain0=gain1; break; case 1: gain0=gain2; break;
-        case 2: gain0=gain3; break; case 3: gain0=gain4; break; case 4: gain0=gain5; break;
+        case 2: gain0=gain3; break; case 3: gain0=gain4; break;
       }
       changed = true; setDisplay(PARAM_IN);
     }
   }
 
   auto applyGain = [&](int idx, int val) {
-    val = constrain(val, 0, 10);
+    val = constrain(val, 0, 6);
     switch (idx) {
-      case 1: gain1=val; if(in==0) gain0=val; break;
-      case 2: gain2=val; if(in==1) gain0=val; break;
       case 3: gain3=val; if(in==2) gain0=val; break;
       case 4: gain4=val; if(in==3) gain0=val; break;
-      case 5: gain5=val; if(in==4) gain0=val; break;
     }
     changed = true; setDisplay(PARAM_GAIN);
   };
@@ -86,8 +85,7 @@ static void handleSet() {
     if (req && !power) { power=1; if (in != 7) in_old=in; in=7; }
     else if (!req && power) {
       power=0; mute=0; in=in_old;
-      switch(in){case 0:gain0=gain1;break;case 1:gain0=gain2;break;
-                 case 2:gain0=gain3;break;case 3:gain0=gain4;break;case 4:gain0=gain5;break;}
+      switch(in){case 2:gain0=gain3;break;case 3:gain0=gain4;break;}
     }
     changed = true; updateDisplay();
   }
@@ -96,8 +94,7 @@ static void handleSet() {
     int req = _server.arg("mute").toInt();
     if (req && !mute) { mute=1; if (in != 7) in_old=in; in=7; }
     else if (!req && mute) { mute=0; in=in_old;
-      switch(in){case 0:gain0=gain1;break;case 1:gain0=gain2;break;
-                 case 2:gain0=gain3;break;case 3:gain0=gain4;break;case 4:gain0=gain5;break;}
+      switch(in){case 2:gain0=gain3;break;case 3:gain0=gain4;break;}
     }
     changed = true; updateDisplay();
   }
@@ -141,15 +138,10 @@ input[type=range]{flex:1;accent-color:#00e676;cursor:pointer}
 input.vsl{writing-mode:vertical-lr;direction:rtl;height:72px;accent-color:#00e676;cursor:pointer}
 .gv{font-size:.72rem;color:#00e676}
 .dimmed{opacity:.35;pointer-events:none}
-.hb{display:inline-block;width:9px;height:9px;border-radius:50%;background:#546e7a;
-    vertical-align:middle;margin-left:10px;transition:background .4s}
-.hb.ok{background:#00e676}.hb.err{background:#f44336}
-@keyframes hbp{0%{transform:scale(2);opacity:1}100%{transform:scale(1);opacity:.5}}
-.hb.pulse{animation:hbp .4s ease-out forwards}
 </style>
 </head>
 <body>
-<h1>&#11042; SOLO6C<span id="hb" class="hb"></span></h1>
+<h1>&#11042; SOLO6C</h1>
 
 <div class="card">
   <lbl>Display</lbl>
@@ -185,9 +177,7 @@ input.vsl{writing-mode:vertical-lr;direction:rtl;height:72px;accent-color:#00e67
   <div>
     <lbl>Input</lbl>
     <div class="grp" id="gIn">
-      <button onclick="sp('in',0)">A1</button><button onclick="sp('in',1)">A2</button>
-      <button onclick="sp('in',2)">A3</button><button onclick="sp('in',3)">A4</button>
-      <button onclick="sp('in',4)">A5</button>
+      <button onclick="sp('in',2)">A1</button><button onclick="sp('in',3)">A2</button>
     </div>
   </div>
 </div>
@@ -222,26 +212,21 @@ input.vsl{writing-mode:vertical-lr;direction:rtl;height:72px;accent-color:#00e67
   <div class="grp" id="gMd">
     <button onclick="sp('mode',0)">BYPASS</button>
     <button onclick="sp('mode',1)">TONE</button>
-    <button onclick="sp('mode',2)">Sur Hi</button>
-    <button onclick="sp('mode',3)">Sur Lo</button>
   </div>
+</div>
+
+<div class="card">
+  <lbl>Firmware update</lbl>
+  <form id="fOta" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:4px">
+    <input type="file" id="fwFile" accept=".bin" style="color:#cfd8dc;font-size:.8rem;flex:1">
+    <button type="button" onclick="otaUpload()">Upload</button>
+    <span id="otaSt" style="font-size:.78rem;color:#546e7a"></span>
+  </form>
 </div>
 
 <script>
 const SEGS = ['A','B','C','D','E','F','G','P'];
-let st = {}, drag = false, _hbFail = 0;
-
-function heartbeat(ok) {
-  const el = document.getElementById('hb');
-  if (ok) {
-    _hbFail = 0;
-    el.classList.remove('err','pulse');
-    void el.offsetWidth;
-    el.classList.add('ok','pulse');
-  } else {
-    if (++_hbFail >= 3) { el.classList.remove('ok'); el.classList.add('err'); }
-  }
-}
+let st = {}, drag = false;
 
 function dig(pfx, val) {
   SEGS.forEach((s,i) => {
@@ -253,7 +238,7 @@ function dig(pfx, val) {
 function lbl(p, v) {
   v = parseInt(v);
   const fmts = {
-    vol:  () => (12-v) + ' dB',
+    vol:  () => (v-87) + ' dB',
     bas:  () => (v>=0?'+':'') + v*2 + ' dB',
     treb: () => (v>=0?'+':'') + v*2 + ' dB',
     ball: () => v===0 ? 'C' : (v>0 ? 'R+'+v : 'L+'+Math.abs(v))
@@ -271,7 +256,7 @@ function upd(s) {
   document.getElementById('bMut').classList.toggle('on', !!s.mute);
   document.getElementById('ctls').classList.toggle('dimmed', !!s.power);
 
-  document.querySelectorAll('#gIn button').forEach((b,i) => b.classList.toggle('on', i===s.in));
+  document.querySelectorAll('#gIn button').forEach((b,i) => b.classList.toggle('on', i+2===s.in));
 
   if (!drag) {
     ['vol','bas','treb','ball'].forEach(p => {
@@ -283,18 +268,18 @@ function upd(s) {
 
   const gg = document.getElementById('gGain');
   if (!gg.children.length) {
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 2; i++) {
       const d = document.createElement('div');
       d.className = 'gcol'; d.id = 'gc'+i;
       d.innerHTML = '<lbl>A'+(i+1)+'</lbl>' +
-        '<input class="vsl" type="range" orient="vertical" min="0" max="10" value="0"' +
-        ' oninput="glbl('+i+',this.value)" onchange="sg('+i+',this.value)">' +
+        '<input class="vsl" type="range" orient="vertical" min="0" max="6" value="0"' +
+        ' oninput="glbl('+i+',this.value)" onchange="sg('+(i+2)+',this.value)">' +
         '<span class="gv" id="gv'+i+'">0 dB</span>';
       gg.appendChild(d);
     }
   }
-  [s.gain1,s.gain2,s.gain3,s.gain4,s.gain5].forEach((g,i) => {
-    document.getElementById('gc'+i).classList.toggle('cur', i===s.in);
+  [s.gain3,s.gain4].forEach((g,i) => {
+    document.getElementById('gc'+i).classList.toggle('cur', i+2===s.in);
     if (!drag) gg.children[i].querySelector('input').value = g;
     document.getElementById('gv'+i).textContent = (g*2)+' dB';
   });
@@ -311,17 +296,58 @@ function tog(p)     { sp(p, st[p] ? 0 : 1); }
 document.addEventListener('pointerdown', e => { if (e.target.type==='range') drag=true; });
 document.addEventListener('pointerup',   () => drag=false);
 
-setInterval(() => {
-  const wasDragging = drag;
-  const ctrl = new AbortController();
-  const tid  = setTimeout(() => ctrl.abort(), 1500);
-  fetch('/state', {signal: ctrl.signal})
-    .then(r => r.json())
-    .then(s => { clearTimeout(tid); if (!drag && !wasDragging) upd(s); heartbeat(true); })
-    .catch(() => heartbeat(false));
-}, 400);
+const _wg = {gIn:{p:'in',min:2,max:3}, gSt:{p:'stereo',min:0,max:2}, gMd:{p:'mode',min:0,max:1}};
+document.addEventListener('wheel', e => {
+  const dir = e.deltaY < 0 ? 1 : -1;
+  const el  = e.target;
+  if (el.type === 'range') {
+    e.preventDefault();
+    const nv = Math.min(parseInt(el.max), Math.max(parseInt(el.min), parseInt(el.value) + dir));
+    if (nv !== parseInt(el.value)) {
+      el.value = nv;
+      el.dispatchEvent(new Event('input'));
+      el.dispatchEvent(new Event('change'));
+    }
+    return;
+  }
+  const grp = el.closest('.grp');
+  if (grp && _wg[grp.id]) {
+    e.preventDefault();
+    const c = _wg[grp.id];
+    const nv = Math.min(c.max, Math.max(c.min, st[c.p] + dir));
+    if (nv !== st[c.p]) sp(c.p, nv);
+    return;
+  }
+  if (el.closest('.display')) {
+    e.preventDefault();
+    const nv = Math.min(87, Math.max(12, st.vol + dir));
+    if (nv !== st.vol) sp('vol', nv);
+  }
+}, {passive: false});
 
 fetch('/state').then(r=>r.json()).then(upd);
+const evtSrc = new EventSource('http://' + location.hostname + ':81/');
+evtSrc.onmessage = e => { try { upd(JSON.parse(e.data)); } catch(_) {} };
+
+function otaUpload() {
+  const f = document.getElementById('fwFile').files[0];
+  if (!f) return;
+  const st = document.getElementById('otaSt');
+  const fd = new FormData();
+  fd.append('firmware', f);
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/update');
+  xhr.upload.onprogress = e => {
+    if (e.lengthComputable) st.textContent = Math.round(e.loaded/e.total*100) + '%';
+  };
+  xhr.onload = () => {
+    st.style.color = xhr.responseText === 'OK' ? '#00e676' : '#f44336';
+    st.textContent = xhr.responseText === 'OK' ? 'Done — rebooting…' : 'Error: ' + xhr.responseText;
+  };
+  xhr.onerror = () => { st.style.color='#f44336'; st.textContent='Upload failed'; };
+  st.style.color = '#cfd8dc'; st.textContent = '0%';
+  xhr.send(fd);
+}
 </script>
 </body>
 </html>
@@ -330,6 +356,24 @@ fetch('/state').then(r=>r.json()).then(upd);
 // ── Endpoint handlers ─────────────────────────────────────────────────────────
 static void handleRoot()  { _server.send_P(200, "text/html", WEB_HTML); }
 static void handleState() { _server.send(200, "application/json", stateJSON()); }
+
+static void handleOtaDone() {
+  bool ok = !Update.hasError();
+  _server.send(200, "text/plain", ok ? "OK" : Update.errorString());
+  if (ok) { delay(200); ESP.restart(); }
+}
+static void handleOtaUpload() {
+  HTTPUpload& u = _server.upload();
+  if (u.status == UPLOAD_FILE_START) {
+    Serial.printf("[OTA] start: %s\n", u.filename.c_str());
+    Update.begin(UPDATE_SIZE_UNKNOWN);
+  } else if (u.status == UPLOAD_FILE_WRITE) {
+    Update.write(u.buf, u.currentSize);
+  } else if (u.status == UPLOAD_FILE_END) {
+    Update.end(true);
+    Serial.printf("[OTA] done: %u bytes, err=%d\n", u.totalSize, Update.hasError());
+  }
+}
 
 // ── Public API ────────────────────────────────────────────────────────────────
 static void updateLED() {
@@ -371,13 +415,48 @@ void setupWebUI() {
     Serial.println(WiFi.softAPIP());
   }
 
-  _server.on("/",      handleRoot);
-  _server.on("/state", handleState);
-  _server.on("/set",   handleSet);
+  _server.on("/",        handleRoot);
+  _server.on("/state",   handleState);
+  _server.on("/set",     handleSet);
+  _server.on("/update",  HTTP_POST, handleOtaDone, handleOtaUpload);
   _server.begin();
+  _sseServer.begin();
+  Serial.println(F("[W4] SSE on port 81"));
 }
 
 void handleWebUI() {
   _server.handleClient();
+
+  // Accept a new SSE client (only one at a time)
+  if (_sseServer.hasClient()) {
+    if (_sseClient) _sseClient.stop();
+    _sseClient = _sseServer.accept();
+    // Drain HTTP request headers until blank line or 500 ms timeout
+    String buf;
+    bool done = false;
+    uint32_t t = millis();
+    while (!done && millis() - t < 500 && _sseClient.connected()) {
+      while (!done && _sseClient.available()) {
+        buf += (char)_sseClient.read();
+        if (buf.endsWith("\r\n\r\n")) done = true;
+      }
+    }
+    _sseClient.print(
+      "HTTP/1.1 200 OK\r\n"
+      "Content-Type: text/event-stream\r\n"
+      "Cache-Control: no-cache\r\n"
+      "Connection: keep-alive\r\n"
+      "Access-Control-Allow-Origin: *\r\n"
+      "\r\n");
+    _sseClient.print("data: " + stateJSON() + "\r\n\r\n");
+  }
+
+  // Push state to SSE client whenever something changed
+  if (webDirty) {
+    webDirty = false;
+    if (_sseClient && _sseClient.connected())
+      _sseClient.print("data: " + stateJSON() + "\r\n\r\n");
+  }
+
   updateLED();
 }

@@ -1,26 +1,17 @@
-// ESP32C6 port of solo6c R2A15908SP audio controller
+// ESP32C6 port of solo6c — R2S15904SP audio controller
 // Requires (install via Library Manager):
 //   - IRremote v3.x+
-// Bundled libraries (project folder): R2A15908SP
+// Bundled libraries (project folder): R2S15904SP
 
 // --- IR button codes (NEC 32-bit) ---
-#define IR_1 0x2FDD02F  // Up
-#define IR_2 0x2FD32CD  // Down
-#define IR_3 0x2FD906F  // Right (>)
-#define IR_4 0x2FDF20D  // Left (<)
-#define IR_5 0x2FD708F  // IN
-#define IR_6 0x2FD00FF  // POWER
-#define IR_7 0x2FD2AD5  // MUTE
-
-// --- IR button codes (new remote, NEC 32-bit) ---
-#define IR_NEW_INPUT    0xFB04FE01UL  // Input switch
-#define IR_NEW_MUTE     0xFD02FE01UL  // Mute
-#define IR_NEW_VOLUP    0xEE11FE01UL  // Vol+
-#define IR_NEW_VOLDOWN  0xEF10FE01UL  // Vol-
-#define IR_NEW_TREBUP   0xF609FE01UL  // Treble+
-#define IR_NEW_TREBDOWN 0xF20DFE01UL  // Treble-
-#define IR_NEW_BASUP    0xF50AFE01UL  // Bass+
-#define IR_NEW_BASDOWN  0xF10EFE01UL  // Bass-
+#define IR_INPUT    0xFB04FE01UL  // Input switch
+#define IR_MUTE     0xFD02FE01UL  // Mute
+#define IR_VOLUP    0xEE11FE01UL  // Vol+
+#define IR_VOLDOWN  0xEF10FE01UL  // Vol-
+#define IR_TREBUP   0xF609FE01UL  // Treble+
+#define IR_TREBDOWN 0xF20DFE01UL  // Treble-
+#define IR_BASUP    0xF50AFE01UL  // Bass+
+#define IR_BASDOWN  0xF10EFE01UL  // Bass-
 
 // --- ESP32C6 GPIO assignments (adjust to your wiring) ---
 #define ENC_CLK      20   // Encoder CLK (A) — S1
@@ -28,8 +19,8 @@
 #define ENC_BTN      18   // Encoder pushbutton (active LOW) — SW
 #define IR_RECV_PIN  14   // IR receiver signal pin
 #define STANDBY_PIN  21   // Standby relay/output
-#define I2C_SDA      22   // I2C SDA — R2A15908SP
-#define I2C_SCL      23   // I2C SCL — R2A15908SP
+#define SPI_DI       22   // R2S15904SP data in (DI)
+#define SPI_CLK      23   // R2S15904SP clock (CLK)
 
 // ── Boot isolation — flip 0→1 one by one to find crash ───────────────────────
 #define ENABLE_ENCODER 1
@@ -37,16 +28,16 @@
 #define ENABLE_SEG7    1
 #define ENABLE_AUDIO   1
 
-#include <Wire.h>
 #include <Preferences.h>
-#include <R2A15908SP.h>
+#include "R2S15904SP.h"
 #define DECODE_NEC
-#include <IRremote.hpp>   // IRremote v3+;
+#include <IRremote.hpp>   // IRremote v3+
 #include <Ticker.h>
 
-R2A15908SP        ra;
+R2S15904SP        ra;
 Preferences       prefs;
 volatile int _encAcc = 0;
+bool webDirty = false;
 byte encMode = 0;  // 0=volume, 1=param-select, 2=param-edit
 
 unsigned long times, times1;
@@ -94,15 +85,33 @@ void cl3() { irValue = 0; irRepeat = false; delay(100); }
 void ball_func() { if (ball >  6) ball =  6; if (ball < -6) ball = -6; }
 void treb_func() { if (treb >  7) treb =  7; if (treb < -7) treb = -7; }
 void bass_func() { if (bas  >  7) bas  =  7; if (bas  < -7) bas  = -7; }
-void gain_func() { if (gain0 > 10) gain0 = 10; if (gain0 < 0) gain0 = 0; }
+void gain_func() { if (gain0 > 6) gain0 = 6; if (gain0 < 0) gain0 = 0; }
 void vol_func()  { if (vol > 87) vol = 87; if (vol < 12) vol = 12; }
 
+// R2S15904SP has 4 inputs (0–3).
+// vol=87 → 0 dB attenuation (loudest), vol=12 → 75 dB attenuation (near-mute).
+// in=7 is the mute sentinel set by the mute/power logic above.
+// Write order matches WiseLord sndPowerOn: INCTRL → BTCTRL → VOLCTRL.
+// VOLCTRL (address 0x02) is the commit trigger — IC latches all three registers when
+// VOLCTRL is received last.  Writing VOLCTRL first (old order) committed stale values.
+// Input reversed: IC input = 3 - in (WiseLord convention).
 void audio() {
-  ra.setVolume_left(vol - 6 + ball);
-  ra.setVolume_right(vol - 6 - ball);
-  ra.setIn_Gain(in, gain0);
-  ra.setStereo(stereo, mode);
-  ra.setTone(bas, treb);
+  webDirty = true;
+  if (in == 7) { ra.mute(); return; }
+
+  int l_att = constrain(87 - vol + ball, 0, 89);
+  int r_att = constrain(87 - vol - ball, 0, 89);
+  if (stereo == 1) r_att = 89;
+  if (stereo == 2) l_att = 89;
+
+  Serial.printf("[audio] vol=%d l=%d r=%d bas=%d treb=%d in=%d gain=%d mode=%d st=%d\n",
+                vol, l_att, r_att, bas, treb, in, gain0, mode, stereo);
+
+  ra.setInput((uint8_t)(3 - constrain(in, 0, 3)), (uint8_t)constrain(gain0, 0, 6), mode != 0);
+  delay(1);
+  ra.setTone((int8_t)bas, (int8_t)treb);
+  delay(1);
+  ra.setVolume(l_att, r_att);
 }
 
 void updateDisplay() {
@@ -110,8 +119,12 @@ void updateDisplay() {
   if (mute  == 1) { seg7Set(0x40, 0x40); return; }  // '--'
 
   bool fallback = (displayParam == PARAM_VOL) || (millis() - displayTime >= 3000);
+  // Notify web UI exactly once when the display transitions back to volume
+  static bool _wasFallback = true;
+  if (fallback && !_wasFallback) webDirty = true;
+  _wasFallback = fallback;
   if (fallback) {
-    int v = constrain(vol - 12, 0, 99);
+    int v = constrain(87 - vol, 0, 99);  // 0=loudest, 75=near-mute
     seg7Set(seg7Encode('0' + v / 10), seg7Encode('0' + v % 10));
     return;
   }
@@ -139,7 +152,7 @@ void updateDisplay() {
       else                seg7Set(seg7Encode('L'), seg7Encode('0' + -ball));
       break;
     case PARAM_IN:
-      seg7Set(seg7Encode('A'), seg7Encode('1' + in));
+      seg7Set(seg7Encode('A'), seg7Encode('1' + (in - 2)));
       break;
     case PARAM_GAIN: {
       uint8_t L = seg7Encode('G');
@@ -157,8 +170,6 @@ void updateDisplay() {
       switch (mode) {
         case 0: seg7Set(seg7Encode('b'), seg7Encode('P')); break;
         case 1: seg7Set(seg7Encode('t'), seg7Encode('o')); break;
-        case 2: seg7Set(seg7Encode('S'), seg7Encode('H')); break;
-        case 3: seg7Set(seg7Encode('S'), seg7Encode('L')); break;
       }
       break;
     default: break;
@@ -183,8 +194,12 @@ void setup() {
 #endif
   Serial.println(F("[2] Pins OK"));
 
-  Wire.begin(I2C_SDA, I2C_SCL);
-  Serial.println(F("[3] Wire OK"));
+#if ENABLE_AUDIO
+  ra.begin(SPI_CLK, SPI_DI);
+  Serial.println(F("[3] R2S15904SP SPI OK"));
+#else
+  Serial.println(F("[3] Audio skipped"));
+#endif
 
 #if ENABLE_IR
   IrReceiver.begin(IR_RECV_PIN, DISABLE_LED_FEEDBACK);
@@ -195,12 +210,13 @@ void setup() {
 
   prefs.begin("solo6c", false);
   vol    = prefs.getUChar("vol",    50);
-  in     = prefs.getUChar("in",      0);
+  in     = prefs.getUChar("in",      2);
+  if (in < 2 || in > 3) in = 2;   // only inputs 2 and 3 are wired (displayed as A1, A2)
   bas    = (int)prefs.getUChar("bas",   7) - 7;
   treb   = (int)prefs.getUChar("treb",  7) - 7;
   ball   = (int)prefs.getUChar("ball",  6) - 6;
   stereo = prefs.getUChar("stereo",  0);
-  mode   = prefs.getUChar("mode",    0);
+  mode   = prefs.getUChar("mode",    1); if (mode > 1) mode = 1;
   gain1  = prefs.getUChar("gain1",   0);
   gain2  = prefs.getUChar("gain2",   0);
   gain3  = prefs.getUChar("gain3",   0);
@@ -209,14 +225,13 @@ void setup() {
   Serial.println(F("[5] NVS OK"));
 
   switch (in) {
-    case 0: gain0 = gain1; break;
-    case 1: gain0 = gain2; break;
     case 2: gain0 = gain3; break;
     case 3: gain0 = gain4; break;
-    case 4: gain0 = gain5; break;
   }
 #if ENABLE_AUDIO
-  audio();
+  ra.mute();          // mute before writing parameters (WiseLord sndPowerOn convention)
+  delay(10);
+  audio();            // INCTRL → BTCTRL → VOLCTRL — unmutes as final step
   Serial.println(F("[6] Audio OK"));
 #else
   Serial.println(F("[6] Audio skipped"));
@@ -272,16 +287,12 @@ void loop() {
   }
   if (irValue == 0) { gr1 = 0; gr2 = 0; }
 
-  // ---------- power-on IR menu navigation ----------
+  // ---------- IR commands ----------
   if (power == 0) {
-    if (irValue == IR_2 && mute == 0) { menu++; gr1=0; gr2=0; cl2(); times=millis(); w=1; w2=1; if (menu > 5) menu = 0; }
-    if (irValue == IR_1 && mute == 0) { menu--; gr1=0; gr2=0; cl2(); times=millis(); w=1; w2=1; if (menu < 0) menu = 5; }
-    if (irValue == IR_5 || irValue == IR_NEW_INPUT) { menu=0; in++; gr1=0; gr2=0; cl2(); times=millis(); w=1; w2=1; if (in > 4) in = 0; audio(); setDisplay(PARAM_IN); }
-    if ((irValue == IR_7 || irValue == IR_NEW_MUTE) && mute == 0) { mute=1; menu=100; gr1=0; gr2=0; cl2(); times=millis(); w=1; w2=1; in_old=in; in=7; audio(); updateDisplay(); delay(300); }
-    if ((irValue == IR_7 || irValue == IR_NEW_MUTE) && mute == 1) { mute=0; menu=0; gr1=0; gr2=0; cl2(); times=millis(); w=1; w2=1; in=in_old; audio(); updateDisplay(); delay(300); }
+    if (irValue == IR_INPUT) { menu=0; in++; gr1=0; gr2=0; cl2(); times=millis(); w=1; w2=1; if (in > 3) in = 2; audio(); setDisplay(PARAM_IN); }
+    if (irValue == IR_MUTE && mute == 0) { mute=1; menu=100; gr1=0; gr2=0; cl2(); times=millis(); w=1; w2=1; in_old=in; in=7; audio(); updateDisplay(); delay(300); }
+    if (irValue == IR_MUTE && mute == 1) { mute=0; menu=0; gr1=0; gr2=0; cl2(); times=millis(); w=1; w2=1; in=in_old; audio(); updateDisplay(); delay(300); }
   }
-  if (irValue == IR_6 && power == 0) { power=1; menu=100; gr1=0; gr2=0; cl2(); times=millis(); w=1; w2=1; in_old=in; in=7; audio(); updateDisplay(); delay(3000); }
-  if (irValue == IR_6 && power == 1) { power=0; menu=0; gr1=0; gr2=0; cl2(); times=millis(); w=1; w2=1; in=in_old; audio(); updateDisplay(); delay(1000); }
 #endif // ENABLE_IR
 
 #if ENABLE_ENCODER
@@ -314,6 +325,9 @@ void loop() {
           setDisplay(_menuParam[menu]);
         } else if (encMode == 2) {
           setDisplay(_menuParam[menu]);
+        } else if (encMode == 3 && menu == 6) {
+          // input is selected — one extra click enters gain edit for that input
+          setDisplay(PARAM_GAIN);
         } else {
           encMode = 0; menu = 0;
           setDisplay(PARAM_VOL);
@@ -336,18 +350,21 @@ void loop() {
       if (menu < 1) menu = 6;
       if (menu > 6) menu = 1;
       setDisplay(_menuParam[menu]);
+    } else if (encMode == 3) {
+      gain0 += delta; gain_func();
+      switch (in) { case 2: gain3=gain0; break; case 3: gain4=gain0; break; }
+      audio(); setDisplay(PARAM_GAIN);
     } else {
       switch (menu) {
         case 1: bas    += delta; bass_func(); audio(); setDisplay(PARAM_BAS);  break;
         case 2: treb   += delta; treb_func(); audio(); setDisplay(PARAM_TREB); break;
         case 3: ball   += delta; ball_func(); audio(); setDisplay(PARAM_BALL); break;
         case 4: stereo  = ((stereo + delta) % 3 + 3) % 3; audio(); setDisplay(PARAM_ST);   break;
-        case 5: mode    = ((mode   + delta) % 4 + 4) % 4; audio(); setDisplay(PARAM_MODE); break;
+        case 5: mode    = ((mode   + delta) % 2 + 2) % 2; audio(); setDisplay(PARAM_MODE); break;
         case 6:
-          in = ((in + delta) % 5 + 5) % 5;
+          in = (in - 2 + delta + 2) % 2 + 2;
           switch (in) {
-            case 0: gain0=gain1; break; case 1: gain0=gain2; break;
-            case 2: gain0=gain3; break; case 3: gain0=gain4; break; case 4: gain0=gain5; break;
+            case 2: gain0=gain3; break; case 3: gain0=gain4; break;
           }
           audio(); setDisplay(PARAM_IN); break;
       }
@@ -358,69 +375,20 @@ void loop() {
   // ---------- VOLUME ----------
   if (menu == 0 && menu_in == 0 && power == 0) {
 #if ENABLE_IR
-    if (irValue  == IR_3 || irValue == IR_NEW_VOLUP)   { vol++; gr1=1; gr2=0; cl(); times=millis(); w=1; w2=1; vol_func(); audio(); setDisplay(PARAM_VOL); }
-    if (irRepeat && gr1 == 1)                          { vol++; gr2=0;        cl(); times=millis(); w=1; w2=1; vol_func(); audio(); setDisplay(PARAM_VOL); }
-    if (irValue  == IR_4 || irValue == IR_NEW_VOLDOWN) { vol--; gr1=0; gr2=1; cl(); times=millis(); w=1; w2=1; vol_func(); audio(); setDisplay(PARAM_VOL); }
-    if (irRepeat && gr2 == 1)                          { vol--; gr1=0;        cl(); times=millis(); w=1; w2=1; vol_func(); audio(); setDisplay(PARAM_VOL); }
+    if (irValue  == IR_VOLUP)   { vol++; gr1=1; gr2=0; cl(); times=millis(); w=1; w2=1; vol_func(); audio(); setDisplay(PARAM_VOL); }
+    if (irRepeat && gr1 == 1)  { vol++; gr2=0;        cl(); times=millis(); w=1; w2=1; vol_func(); audio(); setDisplay(PARAM_VOL); }
+    if (irValue  == IR_VOLDOWN) { vol--; gr1=0; gr2=1; cl(); times=millis(); w=1; w2=1; vol_func(); audio(); setDisplay(PARAM_VOL); }
+    if (irRepeat && gr2 == 1)  { vol--; gr1=0;        cl(); times=millis(); w=1; w2=1; vol_func(); audio(); setDisplay(PARAM_VOL); }
 #endif
   }
 
-  // ---------- BASS ----------
-  if (menu == 1) {
-#if ENABLE_IR
-    if (irValue  == IR_3)     { bas++; gr1=1; gr2=0; cl3(); times=millis(); w=1; w2=1; bass_func(); audio(); setDisplay(PARAM_BAS); }
-    if (irRepeat && gr1 == 1) { bas++; gr2=0;        cl3(); times=millis(); w=1; w2=1; bass_func(); audio(); setDisplay(PARAM_BAS); }
-    if (irValue  == IR_4)     { bas--; gr1=0; gr2=1; cl3(); times=millis(); w=1; w2=1; bass_func(); audio(); setDisplay(PARAM_BAS); }
-    if (irRepeat && gr2 == 1) { bas--; gr1=0;        cl3(); times=millis(); w=1; w2=1; bass_func(); audio(); setDisplay(PARAM_BAS); }
-#endif
-  }
-
-  // ---------- TREBLE ----------
-  if (menu == 2) {
-#if ENABLE_IR
-    if (irValue  == IR_3)     { treb++; gr1=1; gr2=0; cl3(); times=millis(); w=1; w2=1; treb_func(); audio(); setDisplay(PARAM_TREB); }
-    if (irRepeat && gr1 == 1) { treb++; gr2=0;        cl3(); times=millis(); w=1; w2=1; treb_func(); audio(); setDisplay(PARAM_TREB); }
-    if (irValue  == IR_4)     { treb--; gr1=0; gr2=1; cl3(); times=millis(); w=1; w2=1; treb_func(); audio(); setDisplay(PARAM_TREB); }
-    if (irRepeat && gr2 == 1) { treb--; gr1=0;        cl3(); times=millis(); w=1; w2=1; treb_func(); audio(); setDisplay(PARAM_TREB); }
-#endif
-  }
-
-  // ---------- BALANCE ----------
-  if (menu == 3) {
-#if ENABLE_IR
-    if (irValue  == IR_3)     { ball++; gr1=1; gr2=0; cl3(); times=millis(); w=1; w2=1; ball_func(); audio(); setDisplay(PARAM_BALL); }
-    if (irRepeat && gr1 == 1) { ball++; gr2=0;        cl3(); times=millis(); w=1; w2=1; ball_func(); audio(); setDisplay(PARAM_BALL); }
-    if (irValue  == IR_4)     { ball--; gr1=0; gr2=1; cl3(); times=millis(); w=1; w2=1; ball_func(); audio(); setDisplay(PARAM_BALL); }
-    if (irRepeat && gr2 == 1) { ball--; gr1=0;        cl3(); times=millis(); w=1; w2=1; ball_func(); audio(); setDisplay(PARAM_BALL); }
-#endif
-  }
-
-  // ---------- STEREO / MONO ----------
-  if (menu == 4) {
-#if ENABLE_IR
-    if (irValue == IR_3) { stereo++; gr1=1; gr2=0; cl3(); times=millis(); w=1; w2=1; if (stereo > 2) stereo=0; audio(); setDisplay(PARAM_ST); }
-    if (irValue == IR_4) { stereo--; gr1=0; gr2=1; cl3(); times=millis(); w=1; w2=1; if (stereo < 0) stereo=2; audio(); setDisplay(PARAM_ST); }
-#endif
-  }
-
-  // ---------- MODE SELECTOR ----------
-  if (menu == 5) {
-#if ENABLE_IR
-    if (irValue == IR_3) { mode++; gr1=1; gr2=0; cl3(); times=millis(); w=1; w2=1; if (mode > 3) mode=0; audio(); setDisplay(PARAM_MODE); }
-    if (irValue == IR_4) { mode--; gr1=0; gr2=1; cl3(); times=millis(); w=1; w2=1; if (mode < 0) mode=3; audio(); setDisplay(PARAM_MODE); }
-#endif
-  }
-
-  // ---------- BASS direct (new remote — works in any menu) ----------
+  // ---------- BASS / TREBLE direct ----------
 #if ENABLE_IR
   if (power == 0 && mute == 0) {
-    if (irValue == IR_NEW_BASUP)   { bas++; gr1=0; gr2=0; cl3(); times=millis(); w=1; w2=1; bass_func(); audio(); setDisplay(PARAM_BAS); }
-    if (irValue == IR_NEW_BASDOWN) { bas--; gr1=0; gr2=0; cl3(); times=millis(); w=1; w2=1; bass_func(); audio(); setDisplay(PARAM_BAS); }
-  }
-  // ---------- TREBLE direct (new remote — works in any menu) ----------
-  if (power == 0 && mute == 0) {
-    if (irValue == IR_NEW_TREBUP)   { treb++; gr1=0; gr2=0; cl3(); times=millis(); w=1; w2=1; treb_func(); audio(); setDisplay(PARAM_TREB); }
-    if (irValue == IR_NEW_TREBDOWN) { treb--; gr1=0; gr2=0; cl3(); times=millis(); w=1; w2=1; treb_func(); audio(); setDisplay(PARAM_TREB); }
+    if (irValue == IR_BASUP)    { bas++;  gr1=0; gr2=0; cl3(); times=millis(); w=1; w2=1; bass_func(); audio(); setDisplay(PARAM_BAS); }
+    if (irValue == IR_BASDOWN)  { bas--;  gr1=0; gr2=0; cl3(); times=millis(); w=1; w2=1; bass_func(); audio(); setDisplay(PARAM_BAS); }
+    if (irValue == IR_TREBUP)   { treb++; gr1=0; gr2=0; cl3(); times=millis(); w=1; w2=1; treb_func(); audio(); setDisplay(PARAM_TREB); }
+    if (irValue == IR_TREBDOWN) { treb--; gr1=0; gr2=0; cl3(); times=millis(); w=1; w2=1; treb_func(); audio(); setDisplay(PARAM_TREB); }
   }
 #endif // ENABLE_IR
 

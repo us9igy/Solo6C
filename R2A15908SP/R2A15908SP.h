@@ -4,7 +4,7 @@
 #ifndef R2A15908SP_H
 #define R2A15908SP_H
 // address 7 bit
-#define R2A15908SP_address 0b1000001 // 0x65 - 7 bit
+#define R2A15908SP_address 0b1000001 // 0x41 - 7 bit
 
 //Sub addresses
 #define VOLUME_L    0x00

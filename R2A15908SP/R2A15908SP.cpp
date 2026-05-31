@@ -3,7 +3,9 @@
 #include "R2A15908SP.h"
 
 R2A15908SP::R2A15908SP(){
-	Wire.begin();
+	// Wire is initialized by the application (solo6c.ino setup()) with the correct SDA/SCL pins.
+	// Do NOT call Wire.begin() here — this constructor runs before setup(), during static
+	// initialization, before the Arduino HAL is ready.
 }
 
 void R2A15908SP::setVolume_left(byte vol_l){
@@ -37,7 +39,11 @@ void R2A15908SP::setTone(int bass, int treb){
 
 void R2A15908SP::writeWire(char a, char b){
   Wire.beginTransmission(R2A15908SP_address);
-  Wire.write (a);
-  Wire.write (b);
-  Wire.endTransmission();
+  Wire.write(a);
+  Wire.write(b);
+  uint8_t err = Wire.endTransmission();
+  if (err) {
+    Serial.print(F("I2C NACK sub=0x")); Serial.print((uint8_t)a, HEX);
+    Serial.print(F(" err=")); Serial.println(err);
+  }
 }
